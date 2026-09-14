@@ -3173,11 +3173,11 @@ var (
 		},
 		{
 			Name:         "grafana.frontendLegacyAPIHandling",
-			Description:  "Controls whether the frontend blocks calls to legacy /api/ endpoints",
+			Description:  `Controls how the frontend handles calls to legacy /api/ endpoints. One of "off", "log" (warn on each call) or "block" (reject before sending).`,
 			Stage:        FeatureStageExperimental,
 			Owner:        grafanaFrontendPlatformSquad,
 			HideFromDocs: true,
-			Expression:   "false",
+			Expression:   "off",
 			Generate:     Generate{Go: true},
 		},
 		{

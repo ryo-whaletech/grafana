@@ -991,7 +991,7 @@ const (
 	FlagGrafanaOnDemandDiagnostics = "grafana.onDemandDiagnostics"
 
 	// FlagGrafanaFrontendLegacyAPIHandling
-	// Controls whether the frontend blocks calls to legacy /api/ endpoints
+	// Controls how the frontend handles calls to legacy /api/ endpoints. One of "off", "log" (warn on each call) or "block" (reject before sending).
 	FlagGrafanaFrontendLegacyAPIHandling = "grafana.frontendLegacyAPIHandling"
 
 	// FlagGrafanaOfrepRootUrl
