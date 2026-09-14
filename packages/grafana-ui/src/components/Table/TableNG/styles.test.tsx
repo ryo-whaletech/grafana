@@ -54,11 +54,55 @@ function gridVarsFor(theme: GrafanaTheme2, props: Partial<React.ComponentProps<t
     headerBackground: computed.getPropertyValue('--rdg-header-background-color'),
     rowHoverBackground: computed.getPropertyValue('--rdg-row-hover-background-color'),
     borderColor: computed.getPropertyValue('--rdg-border-color'),
+    // Emotion's injected rules accumulate across cases in a file, so anything read back out of the
+    // stylesheet has to be scoped to the class this render actually produced.
+    gridClass: Array.from(grid.classList).find((c) => c.startsWith('css-')) ?? '',
     /** Background each body row resolves to, in document order. */
     rowBackgrounds: Array.from(container.querySelectorAll('.rdg-row:not(.rdg-summary-row)')).map(
       (row) => window.getComputedStyle(row).backgroundColor
     ),
   };
+}
+
+/** Accepts the several shapes these colors come back in: `#rrggbb`, `rgb(...)` and `rgba(...)`. */
+const parseRgb = (color: string): [number, number, number] => {
+  const hex = color.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i);
+  if (hex) {
+    return [1, 2, 3].map((i) => parseInt(hex[i], 16)) as [number, number, number];
+  }
+  const rgb = color.match(/(\d+),\s*(\d+),\s*(\d+)/);
+  if (!rgb) {
+    throw new Error(`could not parse ${color}`);
+  }
+  return [+rgb[1], +rgb[2], +rgb[3]];
+};
+
+/**
+ * Composites the overlay the hover rule carries over `background`, giving the color a hovered row
+ * actually resolves to. Read out of the injected stylesheet rather than asserted as a literal,
+ * because jsdom may normalize `rgba()` to 8-digit hex on the way in.
+ */
+function hoverOverlayOver(background: string, gridClass: string): [number, number, number] {
+  for (const sheet of Array.from(document.styleSheets)) {
+    for (const rule of Array.from(sheet.cssRules)) {
+      if (
+        !rule.cssText.startsWith(`.${gridClass} `) ||
+        !/:hover>\.rdg-cell \{background-image: linear-gradient\(/.test(rule.cssText)
+      ) {
+        continue;
+      }
+      const overlay = rule.cssText.match(/linear-gradient\((#[0-9a-f]{8}|rgba?\([^)]*\))/i)?.[1];
+      if (!overlay) {
+        throw new Error(`could not find an overlay color in ${rule.cssText}`);
+      }
+      const hex = overlay.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+      const rgb = hex ? ([1, 2, 3].map((i) => parseInt(hex[i], 16)) as [number, number, number]) : parseRgb(overlay);
+      const alpha = hex ? parseInt(hex[4], 16) / 255 : Number(overlay.match(/,\s*([\d.]+)\s*\)$/)?.[1] ?? 1);
+      const base = parseRgb(background);
+      return rgb.map((o, i) => Math.round(base[i] * (1 - alpha) + o * alpha)) as [number, number, number];
+    }
+  }
+  throw new Error('no hover overlay rule was injected');
 }
 
 const darkTheme = createTheme({ colors: { mode: 'dark' } });
@@ -136,32 +180,52 @@ describe('getGridStyles', () => {
       expect(rowBackgrounds).toHaveLength(4);
       expect(new Set(rowBackgrounds).size).toBe(1);
     });
+  });
 
-    // Hover is drawn as an overlay on the hovered cells instead, so that it is the same relative
-    // step over a plain row and a striped one. jsdom never applies `:hover`, so what is asserted
-    // here is the half that is assertable: that the swap no longer moves the color.
+  // Hover is painted as an overlay on the hovered cells, which jsdom never applies `:hover` to. So
+  // these assert the two halves that are assertable: that the swap no longer moves the color, and
+  // that the overlay the rule carries is the one we meant.
+  describe('row hover', () => {
     it.each([
-      ['on', true],
-      ['off', false],
-    ])('stops hover replacing the row background, with table.refresh %s', (_name, tableRefreshEnabled) => {
-      const { rowHoverBackground } = gridVarsFor(darkTheme, {
-        zebraStriping: true,
-        tableRefreshEnabled,
-      });
+      ['table.refresh alone', { tableRefreshEnabled: true, zebraStriping: false }],
+      ['striping alone', { tableRefreshEnabled: false, zebraStriping: true }],
+      ['both', { tableRefreshEnabled: true, zebraStriping: true }],
+    ])('stops the hover swap moving the row background, with %s', (_name, props) => {
+      const { rowHoverBackground } = gridVarsFor(darkTheme, props);
 
-      // Pointed at the row background rather than a color of its own, so the swap is a no-op and
-      // the overlay is the only thing that moves.
       expect(rowHoverBackground).toBe('var(--rdg-row-background-color)');
     });
 
-    it('leaves hover replacing the row background when striping is off', () => {
-      const { rowHoverBackground, rowBackground, headerBackground } = gridVarsFor(darkTheme, {
+    it('keeps the legacy hover color when neither is on', () => {
+      const { rowHoverBackground, rowBackground } = gridVarsFor(darkTheme, {
+        tableRefreshEnabled: false,
         zebraStriping: false,
-        tableRefreshEnabled: true,
       });
 
-      expect(rowHoverBackground).toBe(headerBackground);
+      expect(rowHoverBackground).toBe(darkTheme.colors.background.secondary);
       expect(rowHoverBackground).not.toBe(rowBackground);
+    });
+
+    // The regression this replaces: hover *was* the header surface, so once the header stepped
+    // further off the rows a hovered row read as a second header band.
+    it.each([
+      ['dark', darkTheme],
+      ['light', lightTheme],
+    ])('lifts off the row it is on rather than taking the header surface, in a %s theme', (_name, theme) => {
+      const { rowBackground, headerBackground, gridClass } = gridVarsFor(theme, { tableRefreshEnabled: true });
+
+      // Compositing white (or black) at alpha k is what `emphasize(color, k)` does, so a hovered
+      // row resolves to its own background emphasized - twice the header's 0.06 step, which is what
+      // puts hover past the header instead of on it. Within a point per channel, because the alpha
+      // loses a little precision on its way through the stylesheet.
+      const hovered = hoverOverlayOver(rowBackground, gridClass);
+      const emphasized = parseRgb(theme.colors.emphasize(rowBackground, 0.12));
+
+      hovered.forEach((channel, i) => expect(Math.abs(channel - emphasized[i])).toBeLessThanOrEqual(1));
+
+      // The regression: hover used to land exactly on the header surface.
+      const header = parseRgb(headerBackground);
+      expect(hovered.some((channel, i) => Math.abs(channel - header[i]) > 8)).toBe(true);
     });
   });
 });

@@ -70,6 +70,12 @@ const HEADER_BACKGROUND_EMPHASIS = 0.06;
 // ink750 in dark and neutral100 in light, the pair design picked, within 1/255 of each.
 const ZEBRA_STRIPE_EMPHASIS = 0.04;
 
+// How far a hovered row steps away from its own background. Double the header's step, deliberately:
+// hover used to *be* the header surface, and once the header stepped this far off the rows a hovered
+// row read as a second header band rather than as a hovered row. Hover has to land past the
+// header's surface, not on it.
+const HOVER_EMPHASIS = 0.12;
+
 export const getGridStyles = memoize(
   (
     theme: GrafanaTheme2,
@@ -96,28 +102,38 @@ export const getGridStyles = memoize(
       ? colorManipulator.onBackground(theme.colors.warning.main, bgColor).darken(37).toHexString()
       : colorManipulator.onBackground(theme.colors.warning.main, bgColor).lighten(25).toHexString();
 
-    // Same reason as `rowHoverBackgroundColor` below: with striping on, the overlay is the only
-    // thing hover moves, on a selected row as much as on any other.
-    const selectedRowHoverColor = zebraStriping
-      ? 'var(--rdg-row-selected-background-color)'
-      : theme.colors.emphasize(selectedRowColor, 0.05);
-
     const headerBackgroundColor = tableRefreshEnabled
       ? theme.colors.emphasize(bgColor, HEADER_BACKGROUND_EMPHASIS)
       : bgColor;
 
     const zebraStripeBackgroundColor = theme.colors.emphasize(bgColor, ZEBRA_STRIPE_EMPHASIS);
 
-    // Striping draws hover as an overlay over whatever background the row already has (see the
-    // rule below), so react-data-grid's own swap has to stop moving the colour — a plain row would
+    // `table.refresh` draws hover as an overlay over whatever background the row already has (see
+    // the rule below), so react-data-grid's own swap has to stop moving the colour: a row would
     // otherwise lift twice, and a striped one would lose its stripe on the way.
-    const rowHoverBackgroundColor = zebraStriping
+    const hoverIsOverlaid = tableRefreshEnabled || zebraStriping;
+
+    // `lighten(c, k)` is `c + (255 - c) * k` and `darken(c, k)` is `c * (1 - k)` — which is exactly
+    // what compositing white, or black, at alpha `k` does. So this overlay *is*
+    // `emphasize(rowBackground, HOVER_EMPHASIS)`, computed by the browser rather than by us, which
+    // is what lets one rule cover a plain row and a striped one without knowing which it is.
+    // The direction follows `emphasize`'s own rule so the two can't disagree.
+    const hoverOverlayColor = colorManipulator.alpha(
+      colorManipulator.getLuminance(bgColor) > 0.5 ? 'rgb(0, 0, 0)' : 'rgb(255, 255, 255)',
+      HOVER_EMPHASIS
+    );
+
+    const rowHoverBackgroundColor = hoverIsOverlaid
       ? 'var(--rdg-row-background-color)'
-      : tableRefreshEnabled
-        ? headerBackgroundColor
-        : transparent
-          ? theme.colors.background.primary
-          : theme.colors.background.secondary;
+      : transparent
+        ? theme.colors.background.primary
+        : theme.colors.background.secondary;
+
+    // Where hover is overlaid, it is the only thing hover moves — on a selected row as much as on
+    // any other.
+    const selectedRowHoverColor = hoverIsOverlaid
+      ? 'var(--rdg-row-selected-background-color)'
+      : theme.colors.emphasize(selectedRowColor, 0.05);
 
     // The expander column is the outer table's first column (see markEdgeColumns), so under
     // `noPanelPadding` it picks up the same `FIRST_COLUMN_EXTRA_PADDING` inline-start bump as any
@@ -139,10 +155,10 @@ export const getGridStyles = memoize(
         // note: this cannot have any transparency since default cells that
         // overlay/overflow on hover inherit this background and need to occlude cells below
         '--rdg-row-background-color': bgColor,
-        // Under `table.refresh` a hovered row takes the header's surface, so "one step off the row
-        // background" means one thing across the table. The old pair had the same blind spot the
-        // header did: on a transparent panel it hovered *lighter* (`background.primary`), which in a
-        // light theme is white on near-white.
+        // Under `table.refresh` this is deliberately the row background: hover is painted as an
+        // overlay instead (see `hoverIsOverlaid`), so the swap has to be a no-op. Without the flag
+        // it keeps its old pair, blind spot included — on a transparent panel it hovers *lighter*
+        // (`background.primary`), which in a light theme is white on near-white.
         '--rdg-row-hover-background-color': rowHoverBackgroundColor,
         '--rdg-row-selected-background-color': selectedRowColor,
         '--rdg-row-selected-hover-background-color': selectedRowHoverColor,
@@ -216,21 +232,23 @@ export const getGridStyles = memoize(
               backgroundColor: zebraStripeBackgroundColor,
             },
           },
+        }),
 
-          // Hover is a lift *over* the row's own background rather than a different background:
-          // with two row backgrounds in play, no single hover colour can sit the same distance from
-          // both, and replacing it made hover a weaker signal on exactly the striped rows. An
-          // `action.hover` overlay is the same relative step on plain, striped and selected rows
-          // alike, and it leaves the stripe visible underneath instead of erasing it.
-          //
-          // It goes on the cells, not the row: a row paints no box of its own, and frozen cells
-          // carry their own opaque background that a row-level rule would never reach. Cells whose
-          // own colour comes from a cell display mode set it inline, so they keep ignoring hover
-          // exactly as they do today. Nested containers are skipped because hovering a row of an
-          // inner table also hovers the container that table sits in, which would tint the whole
-          // sub-table.
+        // Hover is a lift *over* the row's own background rather than a background of its own.
+        // Taking the header's surface made a hovered row read as a second header band, and with
+        // striping on there are two row backgrounds no single hover colour can sit the same
+        // distance from — it left hover a weaker signal on exactly the striped rows. An overlay is
+        // the same relative step on a plain row, a striped one and a selected one alike, and it
+        // leaves the stripe visible underneath instead of erasing it.
+        //
+        // It goes on the cells, not the row: a row paints no box of its own, and frozen cells carry
+        // their own opaque background that a row-level rule would never reach. Cells whose own
+        // colour comes from a cell display mode set it inline, so they keep ignoring hover exactly
+        // as they do today. Nested containers are skipped because hovering a row of an inner table
+        // also hovers the container that table sits in, which would tint the whole sub-table.
+        ...(hoverIsOverlaid && {
           [`.rdg-row:not(.rdg-summary-row, .${NESTED_ROW_CLASS}):hover > .rdg-cell`]: {
-            backgroundImage: `linear-gradient(${theme.colors.action.hover}, ${theme.colors.action.hover})`,
+            backgroundImage: `linear-gradient(${hoverOverlayColor}, ${hoverOverlayColor})`,
           },
         }),
 
