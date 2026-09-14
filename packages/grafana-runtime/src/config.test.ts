@@ -2,6 +2,7 @@ import { AppEvents, type BootData, type GrafanaConfig } from '@grafana/data';
 
 import { GrafanaBootConfig } from './config';
 import { setAppEvents } from './services/appEvents';
+import { type LegacyFeatureToggleMode } from './utils/legacyFeatureToggles';
 
 describe('GrafanaBootConfig legacy feature toggle handling', () => {
   let warnSpy: jest.SpyInstance;
@@ -21,7 +22,7 @@ describe('GrafanaBootConfig legacy feature toggle handling', () => {
 
   describe('off', () => {
     it.each([undefined, 'off', 'nonsense'])('does nothing when the mode is %s', (mode) => {
-      window.__grafanaLegacyFeatureToggleMode = mode;
+      window.__grafanaLegacyFeatureToggleMode = mode as LegacyFeatureToggleMode | undefined;
       const config = createConfig();
 
       expect(config.featureToggles.panelTitleSearch).toBe(true);
